@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="JsonSignature.Tests/JsonSignature.Tests.csproj" />
+  <Project Path="JsonSignature/JsonSignature.csproj" />
+</Solution>

@@ -1,0 +1,26 @@
+name: Run tests
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore JsonSignature.slnx
+
+      - name: Build
+        run: dotnet build JsonSignature.slnx --no-restore
+
+      - name: Test
+        run: dotnet test JsonSignature.slnx --no-build --verbosity normal
