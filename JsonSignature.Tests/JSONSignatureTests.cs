@@ -144,4 +144,181 @@ public class JSONSignatureTests
 
         Assert.Throws<InvalidOperationException>(() => JSONSignature.Verify(source, []));
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SignWithASingleKeyShouldWork(bool withHeaders)
+    {
+        var content = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { test = "test", extra = 234 }));
+        var headers = withHeaders ? new System.Collections.Generic.Dictionary<string, string> { { "test", "1234" } } : null;
+        var key = new RSACryptoServiceProvider(2048);
+
+        using var source = new MemoryStream(content);
+        using var target = new MemoryStream();
+
+        await JSONSignature.SignAsync(source, target, [new JSONSignature.SignOperation(JSONSignature.RSA_SHA256, key.ToXmlString(false), key.ToXmlString(true), headers)]);
+
+        target.Position = 0;
+
+        var valids = JSONSignature.Verify(target, [new JSONSignature.VerifyOperation(JSONSignature.RSA_SHA256, key.ToXmlString(false))]);
+        Assert.Single(valids);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SignWithMultipleAlgsShouldWork(bool withHeaders)
+    {
+        var content = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { test = "test", extra = 234 }));
+        var headers = withHeaders ? new System.Collections.Generic.Dictionary<string, string> { { "test", "1234" } } : null;
+        var key = new RSACryptoServiceProvider(2048);
+
+        using var source = new MemoryStream(content);
+        using var target = new MemoryStream();
+
+        var algs = new[] { JSONSignature.RSA_SHA256, JSONSignature.RSA_SHA384, JSONSignature.RSA_SHA512 };
+
+        await JSONSignature.SignAsync(source, target, algs.Select(x => new JSONSignature.SignOperation(x, key.ToXmlString(false), key.ToXmlString(true), headers)));
+
+        target.Position = 0;
+        var valids = JSONSignature.Verify(target, algs.Select(x => new JSONSignature.VerifyOperation(x, key.ToXmlString(false))));
+        Assert.Equal(algs.Length, valids.Count());
+        foreach (var alg in algs)
+        {
+            target.Position = 0;
+            var valid = JSONSignature.Verify(target, [new JSONSignature.VerifyOperation(alg, key.ToXmlString(false))]);
+            Assert.Single(valid);
+            Assert.Equal(alg, valid.First().Algorithm);
+            Assert.Equal(key.ToXmlString(false), valid.First().PublicKey);
+
+            target.Position = 0;
+            var hasOne = JSONSignature.VerifyAtLeastOne(target, [new JSONSignature.VerifyOperation(alg, key.ToXmlString(false))]);
+            Assert.True(hasOne);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SignWithMultipleKeysShouldWork(bool withHeaders)
+    {
+        var content = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { test = "test", extra = 234 }));
+        var headers = withHeaders ? new System.Collections.Generic.Dictionary<string, string> { { "test", "1234" } } : null;
+        var keys = new[] { new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(1024) };
+
+        using var source = new MemoryStream(content);
+        using var target = new MemoryStream();
+
+        var algs = new[] { JSONSignature.RSA_SHA256, JSONSignature.RSA_SHA384, JSONSignature.RSA_SHA512 };
+        var algkeycombos = algs.SelectMany(alg => keys.Select(key => (Alg: alg, Key: key))).ToArray();
+
+        await JSONSignature.SignAsync(source, target, algkeycombos.Select(x => new JSONSignature.SignOperation(x.Alg, x.Key.ToXmlString(false), x.Key.ToXmlString(true), headers)));
+
+        target.Position = 0;
+        var valids = JSONSignature.Verify(target, algkeycombos.Select(x => new JSONSignature.VerifyOperation(x.Alg, x.Key.ToXmlString(false))));
+        Assert.Equal(algkeycombos.Length, valids.Count());
+        foreach (var alg in algkeycombos)
+        {
+            target.Position = 0;
+            var valid = JSONSignature.Verify(target, [new JSONSignature.VerifyOperation(alg.Alg, alg.Key.ToXmlString(false))]);
+            Assert.Single(valid);
+            Assert.Equal(alg.Alg, valid.First().Algorithm);
+            Assert.Equal(alg.Key.ToXmlString(false), valid.First().PublicKey);
+
+            target.Position = 0;
+            var hasOne = JSONSignature.VerifyAtLeastOne(target, [new JSONSignature.VerifyOperation(alg.Alg, alg.Key.ToXmlString(false))]);
+            Assert.True(hasOne);
+        }
+    }
+
+    [Fact]
+    public void InvalidSignaturesShouldNotThrow()
+    {
+        var broken1 = new[] {
+            // Invalid Base64 data
+            "//SIGJSONv1: ####.abc=\n{\"x\": 1}"u8.ToArray(),
+
+            // Invalid Base64 data
+            "//SIGJSONv1: abc.abc\n{\"x\": 1}"u8.ToArray(),
+
+            // Invalid header
+            "//SIGJSONv1:abc=.abc=\n{\"x\": 1}"u8.ToArray(),
+
+            // No newline
+            "//SIGJSONv1: abc=.abc={\"x\": 1}"u8.ToArray(),
+
+            // No newline
+            "//SIGJSONv1: abc=.abc={\"x\": 1}\n"u8.ToArray(),
+
+            // Extra newline
+            "//SIGJSONv1: abc=.abc=\n{\"x\": 1}\n"u8.ToArray(),
+        };
+
+        var key = new RSACryptoServiceProvider(2048);
+        foreach (var c in broken1)
+        {
+            using var source = new MemoryStream(c);
+            using var target = new MemoryStream();
+
+            var valids = JSONSignature.Verify(target, [new JSONSignature.VerifyOperation(JSONSignature.RSA_SHA256, key.ToXmlString(false))]);
+            Assert.Empty(valids);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TaintedDataShouldNotValidate(bool withHeaders)
+    {
+        var content = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { test = "test", extra = 234 }));
+        var headers = withHeaders ? new System.Collections.Generic.Dictionary<string, string> { { "test", "1234" } } : null;
+        var keys = new[] { new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(1024) };
+
+        using var source = new MemoryStream(content);
+        using var target = new MemoryStream();
+
+        var algs = new[] { JSONSignature.RSA_SHA256, JSONSignature.RSA_SHA384, JSONSignature.RSA_SHA512 };
+        var algkeycombos = algs.SelectMany(alg => keys.Select(key => (Alg: alg, Key: key))).ToArray();
+
+        await JSONSignature.SignAsync(source, target, algkeycombos.Select(x => new JSONSignature.SignOperation(x.Alg, x.Key.ToXmlString(false), x.Key.ToXmlString(true), headers)));
+
+        // Taint the data
+        target.Position = target.Length - 1;
+        target.WriteByte((byte)'\n');
+
+        target.Position = 0;
+        var valids = JSONSignature.Verify(target, algkeycombos.Select(x => new JSONSignature.VerifyOperation(x.Alg, x.Key.ToXmlString(false))));
+        Assert.Empty(valids);
+    }
+
+    [Theory]
+    [InlineData(true, 1)] // Offset=1 breaks the JSON
+    [InlineData(false, 1)]
+    [InlineData(true, 4)] // Offset=4 changes the header key name
+    [InlineData(false, 4)]
+    public async Task TaintedHeadersShouldNotValidate(bool withHeaders, int offset)
+    {
+        var content = System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(new { test = "test", extra = 234 }));
+        var headers = withHeaders ? new System.Collections.Generic.Dictionary<string, string> { { "test", "1234" } } : null;
+        var keys = new[] { new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(2048), new RSACryptoServiceProvider(1024) };
+
+        using var source = new MemoryStream(content);
+        using var target = new MemoryStream();
+
+        var algs = new[] { JSONSignature.RSA_SHA256, JSONSignature.RSA_SHA384, JSONSignature.RSA_SHA512 };
+        var algkeycombos = algs.SelectMany(alg => keys.Select(key => (Alg: alg, Key: key))).ToArray();
+
+        await JSONSignature.SignAsync(source, target, algkeycombos.Select(x => new JSONSignature.SignOperation(x.Alg, x.Key.ToXmlString(false), x.Key.ToXmlString(true), headers)));
+
+        // Taint the header data for the first signature
+        target.Position = "//SIGJSONv1: ".Length + offset;
+        var cur = target.ReadByte();
+        target.Position -= 1;
+        target.WriteByte((byte)(cur - 1));
+
+        target.Position = 0;
+        var valids = JSONSignature.Verify(target, algkeycombos.Select(x => new JSONSignature.VerifyOperation(x.Alg, x.Key.ToXmlString(false))));
+        Assert.Equal(algkeycombos.Length - 1, valids.Count());
+    }
 }
